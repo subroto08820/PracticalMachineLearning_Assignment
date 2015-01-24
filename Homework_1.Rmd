@@ -1,0 +1,173 @@
+---
+title: "Practical Machine Learning - Assignment"
+author: "Subrata Mukherjee"
+date: "Sunday, January 25, 2015"
+output: html_document
+---
+
+1. Read in dataset
+------------------
+```{r}
+#Load the caret package and other relevant packages
+library(caret)
+library(lsr)
+library(kernlab)
+library(rattle)
+library(evaluate)
+library(formatR)
+
+#Set working directory so I can reference the files I need:
+setwd("C:/Users/USER/Documents/COURSERA/Practical Machine Learning/Assignments")
+
+
+#Read in the CSV file
+training_all <- read.csv(file="pml-training.csv",head=TRUE, sep=",")
+
+```
+
+Cross validation with the initial dataset
+-----------------------------------------
+The initial dataset consisted of 19,622 observations.  To employ cross validation,a 75%/25% split was employed, allocating 75% to be training set and remaining 25% to testing dataset.  The training set contained 14,718 observations and the testing dataset contained 4,904.  Several machine learning algorithms were employed to determine the best predictor for the outcome variable and then ran this algorithm on the test dataset that contains 25% of original dataset.  The same algorithm was applied to the assigned 20 data points not included in the training.csv file.
+```{r}
+#Create a training set and a testing set
+inTrain <- createDataPartition(y=training_all$classe, p=0.75, list=FALSE)
+training_new <- training_all[inTrain,]
+testing_new <- training_all[-inTrain,]
+```
+
+2. Cleaning the dataset
+-----------------------
+2.1 Cleanup
+After examining this dataset, variables associated with skew, kurtosis, average, variance, etc were removed.  These columns were associated with rows that consisted of multiple measurements that were consolidated into one row.  As the dataset was quite limited with respect to observations that contained these features, these were removed from the model.  This left 56 variables for analysis out of the original 160 variables.
+```{r}
+#Subset out columns related to kurtosis, skewness, min, max, stddev, avg, amplitude
+#Also removed anything that is a factor or text, don't want to have to make dummy variables for these things
+training_new <- training_new[,-grep("kurtosis|skewness|max_|min_|var_|stddev_|avg_|amplitude_|X|user_name|cvtd_timestamp|new_window", colnames(training_all))]
+```
+
+2.2 Non-zero 
+Additionally, we checked to see if there is any need to remove additional variables (specifically with non-zero values) by applying the nearZeroVar function.  The results of this function didn't suggest any additional variables that should be removed beyond what was initially removed from the first pass.
+```{r}
+#Checking for near zero values - Didnt see anything crazy here
+nsv <- nearZeroVar(training_new, saveMetrics=TRUE)
+nsv
+```
+
+2.3 PCA
+Lastly, highly correlated variables were looked at in order to examine potential principal components for variable reduction.  After examining the results of this method, it was decided to forgo the principal component (PCA) route in order to interpret the results of whatever model I settled on easily.
+```{r}
+#Check correlation matrix
+nums<-sapply(training_new, is.numeric)
+training_num_only <- (training_new[,nums])
+M<-abs(cor(training_num_only))
+diag(M) <- 0
+which(M > 0.8, arr.ind=T)
+
+
+#Create some principal components - Didn't really result in much
+preProc <- preProcess(training_new[,-56], method="pca", pcaComp=2)
+trainPC <- predict(preProc, training_new[,-56])
+plot(trainPC[, 1], trainPC[, 2], col=training_new[,56])
+```
+
+3. Applying machine learning algorithms
+---------------------------------------
+**3.1 Decision Tree**
+Initially ran a decision tree analysis; however, the resulting accuracy estimate of 0.53 was not promising.
+```{r}
+#Decision tree
+modFitDT <- train(classe ~ ., method="rpart", data=training_new)
+print(modFitDT)
+confusionMatrix(predict(modFitDT, newdata=training_new), training_new$classe)
+#fancyRpartPlot(modFitDT$finalModel)
+tableDT <- table(predict(modFitDT, newdata=training_new),training_new$classe)
+ftable(tableDT)
+```
+
+**3.2 Random Forest**
+Unfortunately this algorithm was too strenuous for my computer given the default parameters.  It might have made sense to play around with the options to get this method to work, but decided to exhaust the other options first.
+```{r}
+#Random forest - Too strenuous for computer :( :( 
+#modFitRF <- train(classe ~ ., method="rf", data=training_new, prox=TRUE)
+#modFitRF
+``` 
+
+**3.3 Linear Discriminant Analysis**
+The accuracy using this method was only slightly better than the decision tree analysis.  An accuracy of 0.71 was achieved with this method.
+```{r}
+#Try linear discriminant analysis - 71% accuracy, meh
+modFitLDA = train(classe ~ ., data=training_new, method="lda")
+print(modFitLDA)
+confusionMatrix(predict(modFitLDA, newdata=training_new), training_new$classe)
+table(predict(modFitLDA, newdata=training_new),training_new$classe)
+```
+
+**3.4 Boosting with Decision Trees**
+This algorithm resulted in the best classification results as it takes repeated applications of weaker decision tree predictions to create a stronger prediction.  Employing this method led to an in-sample accuracy estimate of >0.99.  As this method was promising with regards to the in-sample data, the model predictors was applied to the test dataset, created at the beginning of the analysis.
+```{r}
+#Boosting w/decision trees - Pretty good success!
+modFitBO <- train(classe ~ ., method="gbm", data=training_new, verbose=FALSE)
+options(digits=10)
+print(modFitBO)
+```
+
+Took some time to understand what the largest drivers were for this analysis.  The largest driver of classification here is the timestamp variable.  This makes sense as the form classification of weight lifting (outcome variable) may degrade as a participant continuously lifts weights.  Another variable which had a high influence on the classification was the roll belt measurement, which suggests that changes in this measurement impact the form of participants.
+```{r}
+summary(modFitBO)
+table(predict(modFitBO, newdata=training_new),training_new$classe)
+
+
+#Calculate in sample error (though we get this from the output, just wanted additional significant digits)
+check_in_sample <- predict(modFitBO, newdata=training_new) == training_new$classe
+in_sample_accuracy <- table(check_in_sample)["TRUE"]/length(check_in_sample)
+in_sample_accuracy
+```
+
+4. Estimating out of sample error
+---------------------------------
+To understand the out of sample error, we'd want to look at the accuracy estimates on our test dataset (out of sample error) and compare it with the accuracy estimate on our training dataset (in-sample error).  We will expect the out of sample error to be larger than the in-sample error.  To calculate the out of sample accuracy and kappa levels, confusion matrix was run on the predicted classifications based on the boosting decision tree model with the actual classifications from the testing dataset that was created.
+
+|          | In Sample Error | Out of Sample Error |
+|----------|-----------------|---------------------|
+| Accuracy |      0.9987     |        0.9961       |
+| Kappa    |      0.9985     |        0.9951       |
+
+As you can see, the accuracy estimate is slightly lower for the out of sample error estimate which makes sense as this data was not included in developing the model.  As a result, the out of sample accuracy and kappa rates are better estimates of the true out of sample error associated with this data as we have avoided over fitting our model as much as possible.
+```{r}
+#Check decision tree w/boosting results on my test dataset
+table(predict(modFitBO, newdata=testing_new),testing_new$classe)
+
+
+#Calculate the out of sample error based on this test dataset
+check <- predict(modFitBO, newdata=testing_new) == testing_new$classe
+out_sample_accuracy <- table(check)["TRUE"]/length(check)
+out_sample_accuracy
+
+
+#Run a confusion matrix to get out of sample error
+confusionMatrix(predict(modFitBO, newdata=testing_new), testing_new$classe)
+```
+
+5. Application of model parameters to the 20 observation test dataset
+---------------------------------------------------------------------
+The resulting boosting decision tree model was applied to the 20 data points provided without the "classe" values present.  This model was able to predict all 20 values accurately.
+```{r}
+#Read in the testing data set
+#Let's see how great my model is in real life!
+testing_all <- read.csv(file="pml-testing.csv",head=TRUE, sep=",")
+new_predictions <- predict(modFitBO, newdata=testing_all)
+new_predictions
+
+
+#Save the predicted values to individual text files for upload
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+pml_write_files(new_predictions)
+
+```
+
